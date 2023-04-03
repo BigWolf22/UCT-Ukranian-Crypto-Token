@@ -1,0 +1,507 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+
+
+contract UkrainianCryptoToken {
+    string public constant name = "Ukrainian Crypto Token";
+    string public constant symbol = "UCT";
+    uint8 public constant decimals = 18;
+    uint256 public constant totalSupply = 100000000 * 10 ** uint256(decimals);
+    address public owner = 0x14400987d7a7Bd01D8EDf01249Db7b3c4B60b9C2;
+    uint256 public tokenLock;
+    uint256 public icoStartTime;
+    uint256 public icoEndTime;
+    uint256 public tokenRate = 4;
+    uint256 public minBNBPrice = 100 * 10 ** uint256(decimals);
+    uint256 public tokenPrice = 110 * 10 ** uint256(decimals);
+    uint256 public lastPriceCheck;
+    uint256 public price;
+    uint256 public BNBPrice;
+    address[] lockedAddresses;
+    mapping(address => uint256) private balanceOf;
+    mapping(address => mapping(address => uint256)) private allowance;
+    mapping(address => uint256) private locked;
+    mapping(address => uint256) public unlockDate;
+    mapping(address => uint256) public lockedTokens;
+    mapping(address => uint256) public balances;
+    mapping(address => mapping(address => uint256)) public allowed;
+    mapping(address => bool) public lockAddresses;
+    mapping(address => bool) public icoParticipants;
+    mapping(address => uint256) public icoBalances;
+    mapping(address => bool) public whiteList;
+    mapping(address => uint256) public lockedAmounts;
+    mapping(address => bool) public blackList;
+    mapping(address => uint256) public transactions;
+    mapping(address => mapping(uint256 => Transaction)) public transactionHistory;
+    mapping(address => mapping(bytes32 => uint256)) getLockedTokens;
+    mapping(string => mapping(address => uint256)) lockedTokensByPurpose;
+    //mapping(bytes32 => mapping(address => uint256)) lockedTokens;
+    address payable public treasury = payable(0x14400987d7a7Bd01D8EDf01249Db7b3c4B60b9C2);
+    uint256 public constant transactionFee = 2;
+    uint256 public totalLocked;
+    uint256 private commissionBalance;
+    bool public ICOStatus = true;
+    address public BNBAddress;
+    uint256 tolerance;
+    struct Transaction {
+         address from;
+         address to;
+         uint256 amount;
+         uint256 fee;
+         uint256 date;
+     }
+    
+  
+  
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
+    event LockTokens(address indexed _spender, uint256 _value);
+    event UnlockTokens(address indexed _spender, uint256 _value);
+    event TokensLocked(address indexed _owner, string _purpose, uint256 _value);
+    event TokensUnlocked(address indexed _addr, uint256 _value);
+    event TokensReleased(address indexed _addr, string _purpose, uint256 _value);
+    event WithdrawCommission(uint256 commission);
+
+
+    constructor() {
+         balances[owner] = totalSupply;
+         emit Transfer(address(0), owner, totalSupply);
+     } 
+    modifier onlyOwner() {
+         require(msg.sender == owner, "Only the contract owner can perform this action.");
+         _;
+     } 
+    modifier canTransfer(address _from, address _to, uint256 _value) {
+         require(_to != address(0), "Cannot send tokens to the zero address.");
+         require(_value > 0, "Cannot send zero tokens.");
+         require(balances[_from] >= _value, "Insufficient balance.");
+         require(!lockAddresses[_from], "Cannot send tokens from a locked address.");
+         require(!lockAddresses[_to], "Cannot send tokens to a locked address.");
+         require(!blackList[_from], "Sender is blacklisted.");
+         require(!blackList[_to], "Recipient is blacklisted.");
+         require(whiteList[_from] || whiteList[_to], "Either sender or recipient must be whitelisted.");
+         _;
+     } 
+
+    function getApprove(address _spender, uint256 _value) public returns (bool success) {
+         require(_spender != address(0), "Spender address cannot be zero.");
+         allowed[msg.sender][_spender] = _value;
+         emit Approval(msg.sender, _spender, _value);
+         return true;
+     }
+    function setICOStatus(bool _status) public onlyOwner {
+         ICOStatus = _status;
+     }
+
+    function setTokenPrice(uint256 _tokenPrice) public onlyOwner {
+         tokenPrice = _tokenPrice;
+     }
+
+    function setBNBPrice(uint256 _BNBPrice) public onlyOwner {
+         BNBPrice = _BNBPrice;
+     }
+
+    function setBNBAddress(address _BNBAddress) public onlyOwner {
+     BNBAddress = _BNBAddress;
+     }
+
+
+
+    function setTolerance(uint256 _tolerance) public onlyOwner {
+         tolerance = _tolerance;
+     }
+     function _transfer(address _from, address _to, uint256 _value) internal {
+         require(_to != address(0), "Invalid address.");
+         require(balances[_from] >= _value, "Not enough balance.");
+
+         balances[_from] -= _value;
+         balances[_to] += _value;
+
+         emit Transfer(_from, _to, _value);
+         }
+
+    function getAllowance(address _owner, address _spender) public view returns (uint256 remaining) {
+         return allowed[_owner][_spender];
+     }
+    function getBalance(address _owner) public view returns (uint256 balance) {
+         return balances[_owner];
+         }
+    function lockTokens(address _spender, uint256 _value, uint256 _unlockDate) public onlyOwner {
+     require(_unlockDate > block.timestamp, "Unlock date must be in the future.");
+     require(lockedTokens[_spender] == 0, "Tokens are already locked.");
+     require(balances[_spender] >= _value, "Not enough balance.");
+     lockedTokens[_spender] = _value;
+     unlockDate[_spender] = _unlockDate;
+     emit LockTokens(_spender, _value);
+    }
+
+
+     function unlockTokens(address _spender) public onlyOwner returns (bool success) {
+         require(lockedTokens[_spender] > 0, "No tokens to unlock.");
+    
+         uint256 tokens = lockedTokens[_spender];
+         balances[_spender] += tokens;
+         lockedTokens[_spender] = 0;
+         emit UnlockTokens(_spender, tokens);
+    
+         return true;
+        }
+
+     function distributeTokens(address[] memory _recipients, uint256[] memory _values) public onlyOwner returns (bool success) {
+         require(_recipients.length == _values.length, "Array length must be the same.");
+         uint256 total = 0;
+         for (uint256 i = 0; i < _values.length; i++) {
+             total += _values[i];
+             }
+         require(total <= balances[msg.sender], "Not enough tokens to distribute.");
+    
+         for (uint256 i = 0; i < _recipients.length; i++) {
+        _transfer(msg.sender, _recipients[i], _values[i]);
+        }
+         return true;
+        }
+
+        /**
+         * @dev Allow another address to spend tokens on behalf of the sender.
+         * @param _spender The address authorized to spend.
+         * @param _value The maximum amount they can spend.
+         * @return success Whether the approval was successful or not.
+         */
+     /**
+         * @dev Get the remaining number of tokens that `_spender` can spend on behalf of `_owner`.
+         * @param _owner The address that owns the tokens.
+         * @param _spender The address authorized to spend.
+         * @return remaining The remaining number of tokens that `_spender` can spend on behalf of `_owner`.
+         */
+    /**
+     * @dev Locks tokens for a specific purpose.
+     *
+     * The `_value` amount of tokens belonging to the sender are locked, which prevents them from being transferred
+     * until the lock is released. The lock is identified by `_purpose`, which is a string indicating the purpose
+     * for which the tokens are being locked. Only the owner of the tokens can lock them, and each lock must have a
+     * unique purpose string.
+     *
+     * @param _value The amount of tokens to lock.
+     * @param _purpose A string indicating the purpose of the lock.
+     * @return success Whether the lock was successful or not.
+     */
+
+   function lockTokens(uint256 _value, bytes32 _purpose) public returns (bool success) {
+     require(_value <= balances[msg.sender], "Not enough balance.");
+     require(getLockedTokens[msg.sender][_purpose] == 0, "Tokens with this purpose are already locked.");
+     balances[msg.sender] -= _value;
+     getLockedTokens[msg.sender][_purpose] = _value;
+     emit TokensLocked(msg.sender, _purpose, _value);
+     return true;
+     }
+    /**
+     * @dev Releases locked tokens.
+     *
+     * The tokens locked for the given `_purpose` are released and become transferable again. The `_value` parameter
+     * specifies the number of tokens to release. Only the owner of the locked tokens can release them, and only if
+     * there are enough tokens locked with the specified `_purpose`.
+     *
+     * @param _purpose The purpose of the lock that should be released.
+     * @param _value The number of tokens to release.
+     * @return success Whether the release was successful or not.
+     */
+
+    function releaseTokens(bytes32 _purpose, uint256 _value) public returns (bool success) {
+     require(getLockedTokens[msg.sender][_purpose] >= _value, "Not enough locked tokens.");
+     getLockedTokens[msg.sender][_purpose] -= _value;
+     balances[msg.sender] += _value;
+     emit TokensReleased(msg.sender, _purpose, _value);
+     return true;
+     }
+    /**
+     * @dev Sets a new price for the token.
+     *
+     * The `_price` parameter specifies the new price for the token. The price is stored as a fixed point number with
+     * 18 decimals, so to set a price of 1.23 dollars, the `_
+     @param _price The new price for the token, in BNB.
+     */
+    /**
+
+     @dev Calculates the equivalent amount of tokens for a given amount of BNB,
+     based on the current price.
+     @param _bnbAmount The amount of BNB to convert to tokens.
+     @return The equivalent amount of tokens.
+     */
+    function bnbToTokens(uint256 _bnbAmount) public view returns (uint256) {
+     uint256 tokens = _bnbAmount.mul(price);
+     return tokens.mul(10 ** decimals).div(1 ether);
+     }
+    /**
+     @dev Calculates the equivalent amount of BNB for a given amount of tokens,
+     based on the current price.
+     @param _tokenAmount The amount of tokens to convert to BNB.
+     @return The equivalent amount of BNB.
+     */
+    function tokensToBnb(uint256 _tokenAmount) public view returns (uint256) {
+     uint256 bnb = _tokenAmount.mul(1 ether).div(10 ** decimals);
+     return bnb.div(price);
+     }
+    /**
+     @dev Sets a new price for the token.
+     @param _newPrice The new price to set, in wei.
+     */
+    function setPrice(uint256 _newPrice) public onlyOwner {
+     require(_newPrice > 0, "Price cannot be 0.");
+     price = _newPrice;
+     }
+    /**
+     * @dev Sends tokens to a specified address.
+     * @param _to The address to send tokens to.
+     * @param _value The amount of tokens to send.
+     * @return success Whether the transfer was successful.
+     */
+    function transfer(address _to, uint256 _value) public canTransfer(msg.sender, _to, _value) returns (bool success) {
+     require(balanceOf[msg.sender] >= _value, "Not enough balance.");
+     balanceOf[msg.sender] -= _value;
+     balanceOf[_to] += _value;
+     emit Transfer(msg.sender, _to, _value);
+     return true;
+     }
+    /**
+     * @dev Allows another address to spend tokens on your behalf, up to the approved amount.
+     * @param _spender The address authorized to spend.
+     * @param _value The maximum amount they can spend.
+     * @return success Whether the approval was successful or not.
+     */
+    function approve(address _spender, uint256 _value) public returns (bool success) {
+     allowed[msg.sender][_spender] = _value;
+     emit Approval(msg.sender, _spender, _value);
+     return true;
+     }
+    /**
+     * @dev Transfers tokens from one address to another, if approved by the from address.
+     * @param _from The address to transfer tokens from.
+     * @param _to The address to transfer tokens to.
+     * @param _value The amount of tokens to transfer.
+     * @return success Whether the transfer was successful or not.
+     */
+    function transferFrom(address _from, address _to, uint256 _value) public canTransfer(_from, _to, _value) returns (bool success) {
+     require(allowed[_from][msg.sender] >= _value, "Not enough allowance.");
+     allowed[_from][msg.sender] -= _value;
+     balanceOf[_from] -= _value;
+     balanceOf[_to] += _value;
+     emit Transfer(_from, _to, _value);
+     return true;
+     }
+    /**
+     * @dev Gets the balance of a specified address.
+     * @param _owner The address to query the balance of.
+     * @return balance The balance of the specified address.
+     */
+    /**
+     * @dev Gets the allowance of a specified spender for a specified owner.
+     * @param _owner The address that allowed spending.
+     * @param _spender The address that was authorized to spend.
+     * @return remaining allowance The allowance of the spender for the owner.
+     */
+    /**
+     @dev Locks the specified amount of tokens at the specified address.
+     @param _addr The address to lock tokens at.
+     @param _value The amount of tokens to lock.
+     */
+    function setLock(address _addr, uint256 _value) public onlyOwner {
+     require(_addr != address(0), "Cannot lock tokens at zero address.");
+     require(_value <= balanceOf[_addr], "Cannot lock more tokens than available.");
+     locked[_addr] = _value;
+     }
+    /**
+     @dev Unlocks the specified amount of tokens at the specified address.
+     @param _addr The address to unlock tokens at.
+     @param _value The amount of tokens to unlock.
+     */
+    function unlock(address _addr, uint256 _value) public onlyOwner {
+     require(_addr != address(0), "Invalid address.");
+     require(_value > 0, "Invalid value.");
+     locked[_addr] = locked[_addr].sub(_value);
+     totalLocked = totalLocked.sub(_value);
+     emit TokensUnlocked(_addr, _value);
+     }
+    /**
+     * @dev Locks the specified amount of tokens at the specified address.
+     * @param _addr The address to lock tokens at.
+     * @param _value The amount of tokens to lock.
+     */
+    function lockTokens(address _addr, uint256 _value) public onlyOwner {
+     require(_addr != address(0), "Invalid address.");
+     require(_value > 0, "Invalid amount.");
+     require(balances[_addr] >= _value, "Not enough balance.");
+     balances[_addr] -= _value;
+     lockedTokens[_addr] += _value;
+     emit TokensLocked(_addr, _value);
+     }
+    function lock(address _addr, uint256 _value) public onlyOwner returns (bool success) {
+     require(_addr != address(0), "Invalid address.");
+     require(_value > 0 && _value <= balances[_addr], "Invalid amount to lock.");
+        if (lockedAmounts[_addr] == 0) {
+        lockedAddresses.push(_addr);
+        }
+     lockedAmounts[_addr] = lockedAmounts[_addr].add(_value);
+     balances[_addr] = balances[_addr].sub(_value);
+     emit lock(_addr, _value);
+     return true;
+     }
+    /**
+     * @dev Unlocks all locked tokens at the specified address.
+     * @param _addr The address to unlock all tokens at.
+     * @return success A boolean that indicates whether the operation was successful.
+     */
+    function unlock(address _addr) public onlyOwner returns (bool success) {
+     require(_addr != address(0), "Invalid address.");
+     require(lockedAmounts[_addr] > 0, "No locked amount to unlock.");
+     uint256 value = lockedAmounts[_addr];
+     lockedAmounts[_addr] = 0;
+     balances[_addr] = balances[_addr].add(value);
+     emit unlock(_addr, value);
+     return true;
+     }
+    /**
+     * @dev Gets the amount of locked tokens of the specified address.
+     * @param _addr The address to get the amount of locked tokens of.
+     * @return A uint256 representing the amount of locked tokens.
+     */
+    function getLockedAmount(address _addr) public view returns (uint256) {
+     return lockedAmounts[_addr];
+     }
+    /**
+     * @dev Gets the list of addresses with locked tokens.
+     * @return An array of addresses with locked tokens.
+     */
+    function getLockedAddresses() public view returns (address[] memory) {
+     return lockedAddresses;
+     }
+    /**
+     * @dev Sets a new treasury address.
+     * @param _newTreasury The address of the new treasury.
+     */
+    function setTreasury(address _newTreasury) public onlyOwner {
+     require(_newTreasury != address(0), "Invalid address.");
+     treasury = _newTreasury;
+     }
+    /**
+     * @dev Withdraws the accumulated commission to the treasury address.
+     */
+    function withdrawCommission() public onlyOwner {
+     uint256 commission = commissionBalance;
+     commissionBalance = 0;
+     balances[treasury] = balances[treasury].add(commission);
+     emit WithdrawCommission(commission);
+     }
+    /**
+     * @dev Transfers ownership of the contract to a new owner.
+     * @param _newOwner The address of the new owner.
+     */
+    function transferOwnership(address _newOwner) public onlyOwner {
+     require(_newOwner != address(0), "Invalid address.");
+     owner = _newOwner;
+     unlockDate[owner] = 0;
+     emit TokensUnlocked(owner, balances[owner]);
+     }
+    /**
+     * @dev Internal function to calculate the token amount for a given BNB amount.
+     * @param _bnbAmount The amount of BNB to convert to tokens.
+     * @return The amount of tokens that can be purchased with the specified BNB amount.
+     */
+    function calculateTokenAmount(uint256 _bnbAmount, AggregatorV3Interface priceFeed, mapping(address => uint256) memory lastTokenPrice) internal view returns (uint256) {
+     address[] memory tokenList = [address(0x14400987d7a7Bd01D8EDf01249Db7b3c4B60b9C2)];
+     if (_bnbAmount < 100 ether) {
+        // If BNB price is less than $100, connect to any token with the price increase of 50% or less
+        for (uint i = 0; i < tokenList.length; i++) {
+            IERC20 token = IERC20(tokenList[i]);
+            uint256 currentTokenPrice = priceFeed.getLatestPrice(tokenList[i]);
+            uint256 lastPrice = lastTokenPrice[tokenList[i]];
+            uint256 tokenPriceChange = (currentTokenPrice * 100) / lastPrice - 100;
+            if (tokenPriceChange <= 50 && currentTokenPrice >= 110 ether && token.balanceOf(address(this)) >= _bnbAmount * 4 / currentTokenPrice) {
+                return _bnbAmount * 4 / currentTokenPrice;
+            }
+        }
+        revert("Cannot find any token with the required conditions.");
+        } else {
+        // Otherwise, always connect to BNB
+        return _bnbAmount * priceFeed.getLatestPrice(address(0)) / 10 ** 18;
+     }
+     }
+    /**
+     @dev Internal function that burns an amount of the token of a given account.
+     @param _account The account whose tokens will be burnt.
+     @param _value The amount that will be burnt.
+     */
+    function _burn(address _account, uint256 _value) internal {
+     require(_account != address(0), "Invalid address.");
+     require(_value <= balances[_account], "Insufficient balance.");
+     totalSupply -= _value;
+     balances[_account] -= _value;
+     emit Transfer(_account, address(0), _value);
+     }
+    /**
+     * @dev Function to burn a specific amount of tokens.
+     * @param _value The amount of token to be burned.
+     * @return success A boolean that indicates if the operation was successful.
+     */
+    function burn(uint256 _value) public returns (bool success) {
+     _burn(msg.sender, _value);
+     return true;
+     }
+    /**
+     * @dev Function to burn tokens from a specific address.
+     * @param _from The address which you want to burn tokens from.
+     * @param _value The amount of token to be burned.
+     * @return success A boolean that indicates if the operation was successful.
+     */
+    function burnFrom(address _from, uint256 _value) public returns (bool success) {
+     require(allowed[_from][msg.sender] >= _value, "Not enough allowance.");
+     allowed[_from][msg.sender] -= _value;
+     _burn(_from, _value);
+     return true;
+     }
+    /**
+     @dev Returns the total supply of tokens.
+     */
+    function getTotalSupply() public view returns (uint256) {
+     return totalSupply;
+     }
+    /**
+     @dev Returns the balance of the specified address.
+     @param _owner The address to query the balance of.
+     */
+    /**
+     @dev Returns the allowance of the specified owner to the spender.
+     @param _owner The address that owns the tokens.
+     @param _spender The address that can spend the tokens.
+     */
+    /**
+     @dev Increases the allowance of the specified spender over the owner's tokens.
+     @param _spender The address that can spend the tokens.
+     @param _addedValue The amount of tokens to increase the allowance by.
+     */
+    function increaseAllowance(address _spender, uint256 _addedValue) public returns (bool) {
+     require(_spender != address(0), "Invalid address.");
+     allowed[msg.sender][_spender] = allowed[msg.sender][_spender].add(_addedValue);
+     emit Approval(msg.sender, _spender, allowed[msg.sender][_spender]);
+     return true;
+     }
+    /**
+     @dev Decreases the allowance of the specified spender over the owner's tokens.
+     @param _spender The address that can spend the tokens.
+     @param _subtractedValue The amount of tokens to decrease the allowance by.
+     */
+    function decreaseAllowance(address _spender, uint256 _subtractedValue) public returns (bool) {
+     require(_spender != address(0), "Invalid address.");
+     uint256 oldValue = allowed[msg.sender][_spender];
+         if (_subtractedValue >= oldValue) {
+         allowed[msg.sender][_spender] = 0;
+         } else {
+             allowed[msg.sender][_spender] = oldValue.sub(_subtractedValue);
+             }
+
+     emit Approval(msg.sender, _spender, allowed[msg.sender][_spender]);
+     return true;
+     }
+}
